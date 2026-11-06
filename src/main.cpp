@@ -7,19 +7,19 @@
  * Serial   : 115200 baud
  *
  * CARA PAKAI:
- *   1. Edit bagian CONFIG di bawah — isi STA_SSID dan STA_PASSWORD dengan
- *      WiFi kamu (atau set WIFI_MODE ke WIFI_MODE_AP buat mode hotspot).
- *   2. Upload ke ESP32.
- *   3. Buka Serial Monitor (115200). IP address akan muncul.
+ *   1. Edit "BAGIAN 1 — KONFIGURASI" di bawah: isi STA_SSID dan STA_PASSWORD
+ *      dengan WiFi kamu (atau set WIFI_MODE ke MODE_AP untuk mode hotspot).
+ *   2. Upload ke ESP32 lewat Arduino IDE.
+ *   3. Buka Serial Monitor (115200). IP address akan muncul di situ.
  *   4. Buka IP itu di browser HP untuk setting jadwal minum obat.
  *
  * HARDWARE:
- *   Buzzer aktif (+) -> GPIO 25      Buzzer (-) -> GND
- *   Tombol konfirmasi -> GPIO 27     kaki lain  -> GND
- *   LED indikator    -> GPIO 2 (onboard)
+ *   Buzzer aktif (+)  -> GPIO 25      Buzzer (-) -> GND
+ *   Tombol konfirmasi -> GPIO 27      kaki lain  -> GND
+ *   LED indikator     -> GPIO 2 (onboard)
  *
- * File ini adalah gabungan seluruh source code jadi satu sketch, supaya bisa
- * langsung dibuka di Arduino IDE tanpa perlu file tambahan.
+ * File ini adalah gabungan seluruh source code jadi SATU sketch, supaya bisa
+ * langsung dibuka di Arduino IDE tanpa file tambahan.
  ******************************************************************************/
 
 #include <Arduino.h>
@@ -30,7 +30,7 @@
 #include <time.h>
 
 /* =========================================================================
- * BAGIAN 1 — KONFIGURASI
+ * BAGIAN 1 — KONFIGURASI  (EDIT DI SINI)
  * ========================================================================= */
 
 /*
@@ -55,15 +55,18 @@
 // WiFi
 // ---------------------------------------------------------------------------
 // Two modes:
-//   WIFI_MODE_AP      -> ESP32 becomes its own access point (no router needed).
-//                        Dashboard at http://192.168.4.1
-//                        BUT: no internet => NTP time sync unavailable.
-//   WIFI_MODE_STATION -> ESP32 joins your home WiFi/router.
-//                        Gets NTP time. Dashboard at the IP printed on Serial.
-#define WIFI_MODE_AP          0
-#define WIFI_MODE_STATION     1
+//   MODE_AP      -> ESP32 becomes its own access point (no router needed).
+//                   Dashboard at http://192.168.4.1
+//                   BUT: no internet => NTP time sync unavailable.
+//   MODE_STATION -> ESP32 joins your home WiFi/router.
+//                   Gets NTP time. Dashboard at the IP printed on Serial.
+//
+// NOTE: the names deliberately avoid WIFI_MODE_* — those collide with
+// macros inside the ESP32 Arduino core (WiFiType.h).
+#define MODE_AP          0
+#define MODE_STATION     1
 
-#define WIFI_MODE             WIFI_MODE_STATION
+#define WIFI_MODE        MODE_STATION
 
 #define AP_SSID               "FITALIS"
 #define AP_PASSWORD           "fitalis123"     // min 8 chars; "" for open AP
@@ -1448,8 +1451,26 @@ static void handleAddSchedule() {
   sendJson(201, out);
 }
 
+// Extract a numeric index from paths like /api/schedules/2
+// Written to work on every ESP32 core version (UriBraces is only in newer ones).
+static int pathIndex() {
+  String uri = server.uri();          // e.g. "/api/schedules/2"
+  int slash = uri.lastIndexOf('/');
+  if (slash < 0 || slash >= (int)uri.length() - 1) return -1;
+  String tail = uri.substring(slash + 1);
+  if (tail.length() == 0) return -1;
+  for (size_t i = 0; i < tail.length(); i++) {
+    if (!isdigit((unsigned char)tail[i])) return -1;
+  }
+  return tail.toInt();
+}
+
+static bool isSchedulePath() {
+  return server.uri().startsWith("/api/schedules/");
+}
+
 static void handleUpdateSchedule() {
-  int idx = server.pathArg("index").toInt();
+  int idx = pathIndex();
   String body = server.arg("plain");
 
   if (idx < 0 || idx >= scheduleCount()) { sendErr(404, "schedule not found"); return; }
@@ -1476,7 +1497,7 @@ static void handleUpdateSchedule() {
 }
 
 static void handleDeleteSchedule() {
-  int idx = server.pathArg("index").toInt();
+  int idx = pathIndex();
   if (!scheduleDelete(idx)) { sendErr(404, "schedule not found"); return; }
   sendOk("schedule deleted");
 }
@@ -1528,7 +1549,7 @@ static void handleNotFound() {
 // ===========================================================================
 
 bool webIsConnected() {
-#if WIFI_MODE == WIFI_MODE_STATION
+#if WIFI_MODE == MODE_STATION
   return WiFi.status() == WL_CONNECTED;
 #else
   return true;   // AP is always "up"
@@ -1536,7 +1557,7 @@ bool webIsConnected() {
 }
 
 String webLocalIp() {
-#if WIFI_MODE == WIFI_MODE_STATION
+#if WIFI_MODE == MODE_STATION
   if (WiFi.status() == WL_CONNECTED) return WiFi.localIP().toString();
   return String("0.0.0.0");
 #else
@@ -1545,7 +1566,7 @@ String webLocalIp() {
 }
 
 static void startAccessPoint() {
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP);   // WIFI_AP comes from the core's WiFiType.h
   bool ok = WiFi.softAP(AP_SSID, AP_PASSWORD[0] ? AP_PASSWORD : nullptr);
   LOGF("[wifi] AP %s -> %s\n", ok ? "started" : "FAILED",
        WiFi.softAPIP().toString().c_str());
@@ -1571,7 +1592,7 @@ static bool connectStation() {
 }
 
 bool webConnectAndSyncTime() {
-#if WIFI_MODE == WIFI_MODE_AP
+#if WIFI_MODE == MODE_AP
   startAccessPoint();
   // No internet in AP mode — the dashboard sets the clock instead.
   return false;
@@ -1611,19 +1632,27 @@ void webInit() {
   server.on("/api/schedules", HTTP_GET, handleGetSchedules);
   server.on("/api/schedules", HTTP_POST, handleAddSchedule);
 
-  // Path parameters (<index>) need the newer ESP32 core URI matcher.
-  server.on(UriBraces("/api/schedules/{}"), HTTP_PUT, handleUpdateSchedule);
-  server.on(UriBraces("/api/schedules/{}"), HTTP_DELETE, handleDeleteSchedule);
+  // Indexed routes are matched manually so they work on any core version.
+  server.on("/api/schedules/reset-taken", HTTP_POST, handleResetTaken);
 
   server.on("/api/alarm/ack",     HTTP_POST, handleAlarmAck);
   server.on("/api/alarm/dismiss", HTTP_POST, handleAlarmDismiss);
   server.on("/api/alarm/snooze",  HTTP_POST, handleAlarmSnooze);
 
-  server.on("/api/test/alarm",             HTTP_POST, handleTestAlarm);
-  server.on("/api/schedules/reset-taken",  HTTP_POST, handleResetTaken);
-  server.on("/api/time",                   HTTP_POST, handleSetTime);
+  server.on("/api/test/alarm", HTTP_POST, handleTestAlarm);
+  server.on("/api/time",       HTTP_POST, handleSetTime);
 
-  server.onNotFound(handleNotFound);
+  server.onNotFound([]() {
+    // Fall through: indexed schedule routes and everything else land here.
+    if (isSchedulePath()) {
+      if (server.method() == HTTP_PUT)    { handleUpdateSchedule(); return; }
+      if (server.method() == HTTP_DELETE) { handleDeleteSchedule(); return; }
+      sendErr(405, "method not allowed");
+      return;
+    }
+    handleNotFound();
+  });
+
   server.begin();
   LOGF("[web] dashboard on http://%s/\n", webLocalIp().c_str());
 }
@@ -1631,7 +1660,7 @@ void webInit() {
 void webLoop() {
   server.handleClient();
 
-#if WIFI_MODE == WIFI_MODE_STATION
+#if WIFI_MODE == MODE_STATION
   // Reconnect in the background if the link drops. The reminder keeps
   // running from flash with no network at all.
   static uint32_t lastAttempt = 0;
@@ -1672,7 +1701,7 @@ void webLoop() {
  *
  * FIRST RUN
  *   1. Edit include/config.h: set STA_SSID / STA_PASSWORD (or switch to
- *      WIFI_MODE_AP for a standalone hotspot).
+ *      MODE_AP for a standalone hotspot).
  *   2. Flash, open Serial Monitor at 115200.
  *   3. The IP address is printed. Open it in a phone browser.
  */
@@ -1694,7 +1723,7 @@ static void printBanner() {
   Serial.printf( "  Buzzer    : GPIO %d\n", PIN_BUZZER);
   Serial.printf( "  Button    : GPIO %d\n", PIN_BUTTON_ACK);
   Serial.printf( "  WiFi mode : %s\n",
-                 (WIFI_MODE == WIFI_MODE_AP) ? "AP (standalone hotspot)" : "STATION (join router)");
+                 (WIFI_MODE == MODE_AP) ? "AP (standalone hotspot)" : "STATION (join router)");
   Serial.println(F("----------------------------------------------"));
 }
 
@@ -1718,7 +1747,7 @@ void setup() {
   //    the dashboard.
   bool timeOk = webConnectAndSyncTime();
 
-  if (!timeOk && WIFI_MODE == WIFI_MODE_STATION) {
+  if (!timeOk && WIFI_MODE == MODE_STATION) {
     LOGLN("[main] running without synced clock — set time from the dashboard");
   }
 
